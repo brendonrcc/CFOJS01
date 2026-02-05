@@ -1,4 +1,4 @@
-     const { useState, useEffect, useMemo, useCallback, useRef } = React;
+ const { useState, useEffect, useMemo, useCallback, useRef } = React;
       const { createRoot } = ReactDOM;
       
       const kebabToPascal = (str) => 
@@ -94,7 +94,7 @@
 
       // --- CONSTANTS ---
       const WORKER_URL = "https://api-professor-dashboard.brendonhbrcc.workers.dev/";
-      const MACRO_URL = "https://script.google.com/macros/s/AKfycbynPGZgL3K55nGyq3Ml44R8Q7KSEWPO-cU3eVFF5qVES-1Mr2Ai-bJnWH0XkYyoKnQk/exec";
+      const MACRO_URL = "https://script.google.com/macros/s/AKfycbwM7CsMxOxTI5nTaDBSR2b7emBphrclIMGSONAgNCUzuUbQKigOiDsu9ap-E3fzYKmT/exec";
       
       const AUTH_GID = "1512246214";
       const HISTORY_GID = "552818815";
@@ -1018,7 +1018,6 @@
         const [verdicts, setVerdicts] = useState({}); 
         const [individualScores, setIndividualScores] = useState({});
         const [individualComments, setIndividualComments] = useState({});
-        const [copied, setCopied] = useState(false); 
         const [startTime, setStartTime] = useState(new Date());
         const [isProcessing, setIsProcessing] = useState(false);
         const [isSendingSheet, setIsSendingSheet] = useState(false);
@@ -1100,10 +1099,12 @@
             return report.trim(); 
         };
         
-        const handleSendToSheet = async () => {
+        const handlePostAndProcess = async () => {
             if (studentList.length === 0) return alert("Adicione alunos antes de enviar.");
             setIsSendingSheet(true);
+            
             try {
+                // 1. Send data to Sheet
                 const now = new Date();
                 const payload = studentList.map(student => {
                     const verdict = verdicts[student] || 'Aprovado';
@@ -1116,18 +1117,9 @@
                     }
                     
                     // Lógica para Coluna G (Envio da Atividade)
-                    // Se for Adm, o "score" é Sim/Não
                     const activitySent = isAdminActivity ? scoreVal : "-";
-                    
-                    // Lógica para Coluna J (Pontuação)
-                    // Se for aula normal, é o score. Se for adm, o prompt diz J é pontuação. 
-                    // Assumiremos vazio ou 0 para adm se não especificado, mas o user disse J:J = pontuação.
-                    // Para admin, scoreVal é 'Sim'/'Não', não numérico.
                     const finalScore = isAdminActivity ? "" : scoreVal;
 
-                    // Mapeamento exato das colunas solicitadas
-                    // A: timestamp, B: startTime, C: className, D: type, E: professor
-                    // F: student, G: activitySent, H: comments, I: status, J: score
                     return {
                         "Carimbo de data/hora": now.toLocaleString('pt-BR'),
                         "Início": startTime.toLocaleString('pt-BR'),
@@ -1143,56 +1135,44 @@
                 });
                 
                 await postToSheet(payload);
-                alert("Dados enviados com sucesso para a planilha!");
+                navigator.clipboard.writeText(formatReport()); 
+
+                // 2. Check for Admin Activity Failures and Send MPs (Integrated Action)
+                let mpMessage = "";
+                if (isAdminActivity) {
+                    const failedStudents = studentList.filter(s => (individualScores[s] || 'Sim') === 'Não');
+                    
+                    if (failedStudents.length > 0) {
+                        try {
+                            const resp = await fetch('https://raw.githubusercontent.com/brendonrcc/CFOmps/refs/heads/main/cfoinsa');
+                            if (!resp.ok) throw new Error('Template load failed');
+                            const template = await resp.text();
+                            
+                            let sentCount = 0;
+                            let errorCount = 0;
+
+                            for (const student of failedStudents) {
+                                // Must fetch bbcode and send MP
+                                const success = await sendPrivateMessage(student, '[CFO] Reprovação na Atividade', template);
+                                if (success) sentCount++; else errorCount++;
+                            }
+                            
+                            mpMessage = `\n${sentCount} MP(s) de reprovação enviada(s).`;
+                            if (errorCount > 0) mpMessage += ` Falha ao enviar ${errorCount} MP(s).`;
+                        } catch (e) {
+                            console.error(e);
+                            mpMessage = "\nErro ao carregar modelo de MP.";
+                        }
+                    }
+                }
+
+                alert(`Dados postados com sucesso! Relatório copiado para a área de transferência.${mpMessage}`);
+
             } catch (error) {
                 alert("Erro ao enviar para a planilha. Tente novamente.");
             } finally {
                 setIsSendingSheet(false);
             }
-        };
-
-        const handleFinish = async () => { 
-            setIsProcessing(true);
-            
-            // 1. Copy Report
-            navigator.clipboard.writeText(formatReport()); 
-            
-            // 2. Check for Admin Activity Failures and Send MPs
-            if (isAdminActivity) {
-                // Filtra alunos que não enviaram a atividade (Score == 'Não')
-                // Garante que o valor padrão 'Sim' seja considerado se undefined
-                const failedStudents = studentList.filter(s => (individualScores[s] || 'Sim') === 'Não');
-                let sentCount = 0;
-                let errorCount = 0;
-
-                if (failedStudents.length > 0) {
-                    try {
-                        const resp = await fetch('https://raw.githubusercontent.com/brendonrcc/CFOmps/refs/heads/main/cfoinsa');
-                        if (!resp.ok) throw new Error('Template load failed');
-                        const text = await resp.text();
-
-                        for (const student of failedStudents) {
-                            const success = await sendPrivateMessage(student, '[CFO] Reprovação na Atividade', text);
-                            if (success) sentCount++; else errorCount++;
-                        }
-                        
-                        let msg = "Relatório copiado!";
-                        if (sentCount > 0) msg += ` ${sentCount} MP(s) de reprovação enviada(s).`;
-                        if (errorCount > 0) msg += ` Falha ao enviar ${errorCount} MP(s).`;
-                        alert(msg);
-                    } catch (e) {
-                        console.error(e);
-                        alert("Relatório copiado, mas houve erro ao carregar o modelo de MP.");
-                    }
-                } else {
-                    alert("Relatório copiado com sucesso!");
-                }
-            } else {
-                setCopied(true); 
-                setTimeout(() => setCopied(false), 2000);
-            }
-            
-            setIsProcessing(false);
         };
 
         const formatDateTimeForInput = (date) => { const d = new Date(date); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
@@ -1206,6 +1186,14 @@
                       }
                  } else {
                      setIndividualScores(prev => ({...prev, [student]: value}));
+                     // Auto-reproval logic for Admin Activity
+                     if (isAdminActivity && value === 'Não') {
+                         setVerdicts(prev => ({...prev, [student]: 'Reprovado'}));
+                     } else if (isAdminActivity && value === 'Sim') {
+                         // Optional: auto-approve if changed back to Sim? Usually safer to leave manual or revert to default.
+                         // Let's revert to Aprovado for convenience if it was Reprovado
+                         setVerdicts(prev => ({...prev, [student]: 'Aprovado'}));
+                     }
                  }
              }
              if (field === 'comment') setIndividualComments(prev => ({...prev, [student]: value}));
@@ -1358,13 +1346,9 @@
 
                 <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/90 dark:bg-[#0c120e]/90 backdrop-blur-md border-t border-brand/20 z-40 flex justify-end gap-4 shadow-2xl animate-fade-in">
                     <div className="max-w-7xl w-full mx-auto flex justify-end gap-4">
-                        <button onClick={handleSendToSheet} disabled={isSendingSheet || studentList.length === 0} className="h-14 px-8 bg-green-700 hover:bg-green-800 text-white font-condensed font-bold uppercase tracking-widest text-sm rounded-sm shadow-lg hover:shadow-green-900/30 hover:-translate-y-1 transition-all flex items-center gap-3 active:scale-95 disabled:opacity-50 disabled:translate-y-0 disabled:cursor-wait">
-                            {isSendingSheet ? <Loader2 size={20} className="animate-spin" /> : <Sheet size={20} />}
-                            <span>{isSendingSheet ? 'Enviando...' : 'Enviar Dados'}</span>
-                        </button>
-                        <button onClick={handleFinish} disabled={isProcessing} className="h-14 px-8 bg-brand hover:bg-brand-hover text-white font-condensed font-bold uppercase tracking-widest text-sm rounded-sm shadow-lg hover:shadow-brand/30 hover:-translate-y-1 transition-all flex items-center gap-3 active:scale-95 disabled:opacity-50 disabled:translate-y-0 disabled:cursor-wait">
-                            {isProcessing ? <Loader2 size={20} className="animate-spin" /> : (copied ? <Check size={20} /> : <Copy size={20} />)}
-                            <span>{isProcessing ? 'Processando...' : (copied ? 'Relatório Copiado' : 'Copiar Relatório Final')}</span>
+                        <button onClick={handlePostAndProcess} disabled={isSendingSheet || studentList.length === 0} className="h-14 px-8 bg-brand hover:bg-brand-hover text-white font-condensed font-bold uppercase tracking-widest text-sm rounded-sm shadow-lg hover:shadow-brand/30 hover:-translate-y-1 transition-all flex items-center gap-3 active:scale-95 disabled:opacity-50 disabled:translate-y-0 disabled:cursor-wait">
+                            {isSendingSheet ? <Loader2 size={20} className="animate-spin" /> : <SendHorizontal size={20} />}
+                            <span>{isSendingSheet ? 'Enviando...' : 'Postar'}</span>
                         </button>
                     </div>
                 </div>
@@ -1555,19 +1539,19 @@
                  
                  let motives = "";
                  if (isApproval) {
-                     motives = "Todos os requisitos obrigatórios foram atendidos.";
+                     motives = "Cumpriu os requisitos.";
                  } else {
                      const missingNames = result.missing.map(tag => TAG_NAMES[tag] || tag);
                      if (missingNames.length === 0) motives = "Erro desconhecido.";
-                     else if (missingNames.length === 1) motives = missingNames[0];
+                     else if (missingNames.length === 1) motives = `Faltou o uso de ${missingNames[0]}.`;
                      else {
                          const last = missingNames.pop();
-                         motives = missingNames.join(', ') + ' e ' + last;
+                         motives = `Faltou o uso de ${missingNames.join(', ')} e ${last}.`;
                      }
                  }
                  
                  const messageBody = template.replace('{MOTIVOS}', motives);
-                 const subject = isApproval ? "CFO - Atividade Aprovada" : "CFO - Correção de Atividade";
+                 const subject = isApproval ? "[CFO] Aprovação na Atividade" : "[CFO] Reprovação na Atividade";
                  
                  const success = await sendPrivateMessage(studentNick, subject, messageBody);
                  
