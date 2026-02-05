@@ -1,4 +1,4 @@
-   const { useState, useEffect, useMemo, useCallback, useRef } = React;
+     const { useState, useEffect, useMemo, useCallback, useRef } = React;
       const { createRoot } = ReactDOM;
       
       const kebabToPascal = (str) => 
@@ -90,9 +90,12 @@
       const Plus = (p) => <Icon name="plus" {...p} />;
       const Minus = (p) => <Icon name="minus" {...p} />;
       const Type = (p) => <Icon name="type" {...p} />;
+      const Sheet = (p) => <Icon name="sheet" {...p} />;
 
       // --- CONSTANTS ---
       const WORKER_URL = "https://api-professor-dashboard.brendonhbrcc.workers.dev/";
+      const MACRO_URL = "https://script.google.com/macros/s/AKfycbynPGZgL3K55nGyq3Ml44R8Q7KSEWPO-cU3eVFF5qVES-1Mr2Ai-bJnWH0XkYyoKnQk/exec";
+      
       const AUTH_GID = "1512246214";
       const HISTORY_GID = "552818815";
       const MANUAL_PROF_GID = "2125629446";
@@ -210,17 +213,26 @@
 
             const html = await composeResp.text();
             const dom = new DOMParser().parseFromString(html, 'text/html');
-            const form = dom.querySelector('form textarea[name="message"]')?.closest('form');
-            if (!form) return false;
+            
+            // Procura o formulário de forma mais abrangente
+            const form = dom.querySelector('form[action*="/privmsg"]');
+            if (!form) {
+                console.error("Formulário de MP não encontrado.");
+                return false;
+            }
 
             const formData = new FormData();
             let hasUsernameArrayField = false;
 
+            // Copia todos os inputs ocultos e visíveis necessários
             form.querySelectorAll('input, textarea, select').forEach(el => {
                 const name = el.getAttribute('name');
                 if (!name || name === 'message' || name === 'subject') return;
                 if (name === 'username[]') hasUsernameArrayField = true;
                 if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) return;
+                // Ignora o botão de submit original para evitar duplicidade ou valores incorretos
+                if (el.type === 'submit') return;
+                
                 formData.append(name, el.value || '');
             });
 
@@ -230,7 +242,10 @@
             formData.set('subject', subject);
             formData.set('message', message);
             
-            if (!formData.has('post')) formData.set('post', '1');
+            // Garante que o campo 'post' seja enviado com o valor esperado pelo phpBB (geralmente 'Enviar' ou 'Submit')
+            // Verifica se existe um botão de submit com name="post" e usa seu value, senão usa "Enviar"
+            const submitBtn = form.querySelector('input[type="submit"][name="post"]');
+            formData.set('post', submitBtn ? submitBtn.value : 'Enviar');
 
             const action = form.getAttribute('action') || '/privmsg';
             const sendResp = await fetch(action, {
@@ -239,15 +254,21 @@
                 credentials: 'same-origin'
             });
 
-            if (!sendResp.ok) return false;
+            if (!sendResp.ok) {
+                 console.error(`Erro no envio da MP: ${sendResp.status}`);
+                 return false;
+            }
             
             const textLower = (await sendResp.text()).toLowerCase();
-            if (textLower.includes('não existe') || textLower.includes('flood')) return false;
+            if (textLower.includes('não existe') || textLower.includes('flood')) {
+                console.error("Erro de Flood ou Usuário inexistente.");
+                return false;
+            }
 
             console.log(`MP enviada para: ${username}`);
             return true;
         } catch (error) {
-            console.error(error);
+            console.error("Exceção ao enviar MP:", error);
             return false;
         }
       };
@@ -286,7 +307,7 @@
             formData.set('message', message);
             formData.set('t', topicId);
             formData.set('mode', 'reply');
-            if (!formData.has('post')) formData.set('post', '1'); // Simula o clique em "Enviar"
+            if (!formData.has('post')) formData.set('post', 'Enviar'); // Garante que post tenha valor
 
             // 4. Envia a postagem
             const sendResp = await fetch('/post', {
@@ -313,6 +334,37 @@
             // Repassa o erro para que o seu loop (que tem catch) possa tratar o Flood
             throw error;
         }
+      };
+
+      const postToSheet = async (dataPayload) => {
+          try {
+              // Wrap the data payload in the structure expected by the Google Apps Script
+              const body = {
+                  action: "append_row",
+                  gid: "0",
+                  data: dataPayload
+              };
+
+              // Sends data directly to the Google Apps Script Web App
+              // Using text/plain for the content type is crucial for Google Apps Script Web Apps 
+              // to avoid CORS preflight OPTIONS requests which often fail or are rejected.
+              const response = await fetch(MACRO_URL, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                  body: JSON.stringify(body)
+              });
+              
+              if (!response.ok) {
+                  throw new Error(`Erro ao enviar dados para a planilha: ${response.status}`);
+              }
+              return true;
+          } catch (error) {
+              console.error("Erro ao postar na planilha:", error);
+              // Since GAS Web App responses are often opaque in no-cors mode (or difficult with CORS), 
+              // we might still treat it as a potential success if the fetch didn't throw, 
+              // but here we throw to let the UI handle it.
+              throw error;
+          }
       };
 
       // --- LOGIC HELPERS ---
@@ -969,6 +1021,7 @@
         const [copied, setCopied] = useState(false); 
         const [startTime, setStartTime] = useState(new Date());
         const [isProcessing, setIsProcessing] = useState(false);
+        const [isSendingSheet, setIsSendingSheet] = useState(false);
 
         const studentList = useMemo(() => {
             if (!students.trim()) return [];
@@ -989,7 +1042,6 @@
             if (initialStudent) setStudents(initialStudent); 
         }, [initialClassId, initialStartTime, initialStudent]);
 
-        // Effect to apply initial values to the student map once studentList is populated
         useEffect(() => {
             if (studentList.length > 0) {
                 setVerdicts(prev => {
@@ -1002,8 +1054,6 @@
                 setIndividualScores(prev => {
                     const next = { ...prev };
                     studentList.forEach(s => { 
-                        // For Admin Activities, initialScore controls "Sim" (sent) or "Não"
-                        // If standard class, it's a number. 
                         if (next[s] === undefined) next[s] = initialScore || (isAdminActivity ? 'Sim' : '0'); 
                     });
                     return next;
@@ -1050,6 +1100,57 @@
             return report.trim(); 
         };
         
+        const handleSendToSheet = async () => {
+            if (studentList.length === 0) return alert("Adicione alunos antes de enviar.");
+            setIsSendingSheet(true);
+            try {
+                const now = new Date();
+                const payload = studentList.map(student => {
+                    const verdict = verdicts[student] || 'Aprovado';
+                    const scoreVal = individualScores[student] || (isAdminActivity ? 'Sim' : '0');
+                    
+                    // Lógica para coluna I (Status)
+                    let statusFinal = verdict;
+                    if (isAdminActivity) {
+                        statusFinal = verdict === 'Aprovado' ? 'Aprovado na Atividade' : 'Reprovado na Atividade';
+                    }
+                    
+                    // Lógica para Coluna G (Envio da Atividade)
+                    // Se for Adm, o "score" é Sim/Não
+                    const activitySent = isAdminActivity ? scoreVal : "-";
+                    
+                    // Lógica para Coluna J (Pontuação)
+                    // Se for aula normal, é o score. Se for adm, o prompt diz J é pontuação. 
+                    // Assumiremos vazio ou 0 para adm se não especificado, mas o user disse J:J = pontuação.
+                    // Para admin, scoreVal é 'Sim'/'Não', não numérico.
+                    const finalScore = isAdminActivity ? "" : scoreVal;
+
+                    // Mapeamento exato das colunas solicitadas
+                    // A: timestamp, B: startTime, C: className, D: type, E: professor
+                    // F: student, G: activitySent, H: comments, I: status, J: score
+                    return {
+                        "Carimbo de data/hora": now.toLocaleString('pt-BR'),
+                        "Início": startTime.toLocaleString('pt-BR'),
+                        "Aula aplicada": selectedType.name,
+                        "Tipo": isAdminActivity ? "Atividade" : "Aula",
+                        "Professor(a)": professor.nickname,
+                        "Aluno(a)": student,
+                        "Envio da atividade": activitySent,
+                        "Comentários/Observações": individualComments[student] || 'Sem observações.',
+                        "Status": statusFinal,
+                        "Pontuação": finalScore
+                    };
+                });
+                
+                await postToSheet(payload);
+                alert("Dados enviados com sucesso para a planilha!");
+            } catch (error) {
+                alert("Erro ao enviar para a planilha. Tente novamente.");
+            } finally {
+                setIsSendingSheet(false);
+            }
+        };
+
         const handleFinish = async () => { 
             setIsProcessing(true);
             
@@ -1058,7 +1159,9 @@
             
             // 2. Check for Admin Activity Failures and Send MPs
             if (isAdminActivity) {
-                const failedStudents = studentList.filter(s => individualScores[s] === 'Não');
+                // Filtra alunos que não enviaram a atividade (Score == 'Não')
+                // Garante que o valor padrão 'Sim' seja considerado se undefined
+                const failedStudents = studentList.filter(s => (individualScores[s] || 'Sim') === 'Não');
                 let sentCount = 0;
                 let errorCount = 0;
 
@@ -1253,8 +1356,12 @@
                     )}
                 </div>
 
-                <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/90 dark:bg-[#0c120e]/90 backdrop-blur-md border-t border-brand/20 z-40 flex justify-end shadow-2xl animate-fade-in">
-                    <div className="max-w-7xl w-full mx-auto flex justify-end">
+                <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/90 dark:bg-[#0c120e]/90 backdrop-blur-md border-t border-brand/20 z-40 flex justify-end gap-4 shadow-2xl animate-fade-in">
+                    <div className="max-w-7xl w-full mx-auto flex justify-end gap-4">
+                        <button onClick={handleSendToSheet} disabled={isSendingSheet || studentList.length === 0} className="h-14 px-8 bg-green-700 hover:bg-green-800 text-white font-condensed font-bold uppercase tracking-widest text-sm rounded-sm shadow-lg hover:shadow-green-900/30 hover:-translate-y-1 transition-all flex items-center gap-3 active:scale-95 disabled:opacity-50 disabled:translate-y-0 disabled:cursor-wait">
+                            {isSendingSheet ? <Loader2 size={20} className="animate-spin" /> : <Sheet size={20} />}
+                            <span>{isSendingSheet ? 'Enviando...' : 'Enviar Dados'}</span>
+                        </button>
                         <button onClick={handleFinish} disabled={isProcessing} className="h-14 px-8 bg-brand hover:bg-brand-hover text-white font-condensed font-bold uppercase tracking-widest text-sm rounded-sm shadow-lg hover:shadow-brand/30 hover:-translate-y-1 transition-all flex items-center gap-3 active:scale-95 disabled:opacity-50 disabled:translate-y-0 disabled:cursor-wait">
                             {isProcessing ? <Loader2 size={20} className="animate-spin" /> : (copied ? <Check size={20} /> : <Copy size={20} />)}
                             <span>{isProcessing ? 'Processando...' : (copied ? 'Relatório Copiado' : 'Copiar Relatório Final')}</span>
@@ -1441,6 +1548,7 @@
                      ? "https://raw.githubusercontent.com/brendonrcc/CFOmps/refs/heads/main/cfoapro" 
                      : "https://raw.githubusercontent.com/brendonrcc/CFOmps/refs/heads/main/cforep";
                  
+                 console.log(`[Correction] Fetching template: ${url}`);
                  const resp = await fetch(url);
                  if (!resp.ok) throw new Error('Falha ao carregar modelo de MP');
                  const template = await resp.text();
@@ -1466,11 +1574,11 @@
                  if (success) {
                      alert(`MP enviada com sucesso para ${studentNick}!`);
                  } else {
-                     alert('Erro ao enviar MP. Verifique o login no fórum.');
+                     alert('Erro ao enviar MP. Verifique se o usuário existe ou se há Flood.');
                  }
              } catch (error) {
-                 console.error(error);
-                 alert('Erro ao processar envio da mensagem.');
+                 console.error("[Correction] Error:", error);
+                 alert(`Erro ao processar: ${error.message}`);
              } finally {
                  setSendingMp(false);
              }
