@@ -778,14 +778,18 @@
         const [sentRecipient, setSentRecipient] = useState(null);
 
         const handleSend = async () => { 
+            // Validação básica
             if (!nickname.trim()) return; 
             setSendState('sending'); 
             
+            // Pega o assunto e mensagem definidos no script (CSV)
             const subject = block.content || "Mensagem do Instrutor";
             const rawMessage = block.extra || "";
 
-            // --- LÓGICA DE MÚLTIPLOS NICKS ---
-            // Divide por "/" e remove espaços extras
+            // 1. LÓGICA DE DIVISÃO:
+            // O split('/') quebra o texto na barra.
+            // O map(n => n.trim()) remove espaços antes e depois do nick.
+            // O filter garante que não fiquem nicks vazios na lista.
             const recipients = nickname.split('/').map(n => n.trim()).filter(n => n.length > 0);
 
             if (recipients.length === 0) {
@@ -796,35 +800,43 @@
             let successCount = 0;
             let failCount = 0;
 
-            // Envia para cada nick encontrado
+            // 2. LOOP DE ENVIO (GARANTE O ENVIO PARA O SEGUNDO/TERCEIRO USER):
             for (const recipient of recipients) {
-                // Pequeno delay para evitar bloqueio do fórum (flood)
+                // Pequena pausa (500ms) se houver mais de um envio, para segurança contra flood
                 if (successCount > 0 || failCount > 0) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
 
+                // Envia para o usuário atual do loop
                 const success = await sendPrivateMessage(recipient, subject, rawMessage);
+                
                 if (success) successCount++;
                 else failCount++;
             }
 
+            // 3. RESULTADO FINAL
             if (successCount > 0) {
+                // Marca o bloco como concluído no script visualmente
                 onInteract(block.id); 
+                
+                // Mostra na interface para quem foi enviado (ex: "Nick1, Nick2")
                 setSentRecipient(recipients.join(', '));
                 setSendState('sent'); 
 
+                // Se algum falhou, avisa
                 if (failCount > 0) {
-                    // Alerta se falhou para alguns
-                    alert(`Enviado para ${successCount}. Falha para ${failCount}. Verifique os nicks.`);
+                    alert(`Enviado com sucesso para ${successCount} aluno(s). Falha ao enviar para ${failCount}.`);
                 }
 
+                // Fecha o modal após 2 segundos
                 setTimeout(() => { setIsOpen(false); setSendState('idle'); setNickname(''); }, 2000); 
             } else {
                 setSendState('idle');
-                alert('Erro ao enviar. Verifique se os usuários existem ou aguarde o tempo de flood.');
+                alert('Erro total no envio. Verifique se os usuários existem ou se há restrição de flood.');
             }
         };
 
+        // Renderização do Estado "Enviado" (Visual Verde/Azul no script)
         if (status.isClicked) {
             return (
                 <div className="my-4 animate-fade-in select-none">
@@ -838,6 +850,7 @@
             );
         }
 
+        // Renderização do Botão Fechado
         if (!isOpen) { 
             return (
                 <div className="my-6">
@@ -852,6 +865,7 @@
             ); 
         }
         
+        // Renderização do Formulário Aberto
         return (
             <div className="my-6 animate-fade-in bg-white dark:bg-[#0c120e] border border-brand/30 rounded-sm shadow-lg overflow-hidden relative">
                 <div className="bg-brand/10 px-4 py-2 flex items-center justify-between border-b border-brand/10">
